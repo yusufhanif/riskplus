@@ -55,6 +55,10 @@ from riskplus_core.data import (
     build_portfolio_series,
     compute_vif,
     detect_frequency,
+    infer_fund_name_from_file,
+    merge_analysis_frames,
+    prepare_factor_stream,
+    prepare_return_stream,
     prepare_analysis_data,
     read_uploaded_file,
     run_ols,
@@ -67,102 +71,216 @@ DEFAULT_EWMA_DECAY = 0.94
 
 def main() -> None:
     st.set_page_config(page_title="RiskPlus Streamlit", layout="wide")
+
+    if "analysis_ready" not in st.session_state:
+        st.session_state.analysis_ready = False
+    if "merged_data" not in st.session_state:
+        st.session_state.merged_data = None
+    if "fund_frames" not in st.session_state:
+        st.session_state.fund_frames = {}
+    if "fund_weights" not in st.session_state:
+        st.session_state.fund_weights = {}
+    if "fund_return_cols" not in st.session_state:
+        st.session_state.fund_return_cols = {}
+    if "factor_frame" not in st.session_state:
+        st.session_state.factor_frame = None
+    if "factor_cols" not in st.session_state:
+        st.session_state.factor_cols = []
     
     # ========== SIDEBAR: UPLOAD & SETTINGS ==========
     with st.sidebar:
         st.header("📊 Data & Analysis Setup")
-        
-        # File upload
-        upload = st.file_uploader("Upload portfolio & factor data", type=["csv", "xlsx", "xls"])
-        
-        if upload is None:
-            st.info("Upload a file containing date, portfolio return, and factor return columns.")
-            st.stop()
-        
-        try:
-            raw_df = read_uploaded_file(upload.name, upload.getvalue())
-        except Exception as exc:
-            st.error(str(exc))
-            st.stop()
-        
-        if raw_df.empty:
-            st.error("Uploaded file is empty.")
-            st.stop()
-        
-        # Column mapping
-        st.subheader("Column Mapping")
-        all_cols = raw_df.columns.tolist()
-        date_col = st.selectbox("Date column", options=all_cols, index=0)
-        
-        numeric_guess = [
-            col for col in all_cols
-            if col != date_col and pd.to_numeric(raw_df[col], errors="coerce").notna().mean() > 0.5
-        ]
-        if not numeric_guess:
-            st.error("No numeric columns detected.")
-            st.stop()
-        
-        asset_mode = st.radio(
-            "Return input mode",
-            options=["Single portfolio column", "Multiple fund streams"],
-            index=0,
+
+        st.subheader("1. Fund Return Files")
+        fund_uploads = st.file_uploader(
+            "Upload one file per fund",
+            type=["csv", "xlsx", "xls"],
+            accept_multiple_files=True,
         )
 
-        asset_weight_input = None
-        if asset_mode == "Single portfolio column":
-            asset_cols = [st.selectbox("Portfolio return column", options=numeric_guess, index=0)]
-        else:
-            default_assets = numeric_guess[: min(3, len(numeric_guess))]
-            asset_cols = st.multiselect("Fund return columns", options=numeric_guess, default=default_assets)
-            if asset_cols:
-                st.caption("Optional weights for the selected funds. Leave them as-is to use equal weights.")
-                asset_weights_dict: dict[str, float] = {}
-                default_weight = 1.0 / len(asset_cols)
-                for asset_col in asset_cols:
-                    asset_weights_dict[asset_col] = st.number_input(
-                        f"Weight for {asset_col}",
-                        value=float(default_weight),
-                        min_value=0.0,
-                        step=0.05,
-                        key=f"weight_{asset_col}",
-                    )
-                asset_weight_input = pd.Series(asset_weights_dict, dtype=float)
+        st.subheader("2. Factor Return File")
+        factor_upload = st.file_uploader("Upload factor returns file", type=["csv", "xlsx", "xls"])
 
-        if not asset_cols:
-            st.error("Select at least one return column.")
-            st.stop()
-
-        factor_options = [col for col in numeric_guess if col not in asset_cols]
-        default_factors = factor_options[: min(4, len(factor_options))]
-        factor_cols = st.multiselect("Factor return columns", options=factor_options, default=default_factors)
-        
-        # Data formatting
+        st.subheader("3. Analysis Settings")
+        date_col = st.text_input("Date column name", value="Date")
         values_in_percent = st.checkbox("Values are in percent (5 = 5%)", value=False)
         max_missing_pct = st.slider("Max missing data %", 0.0, 50.0, 5.0, 1.0) / 100.0
-        
-        # Portfolio metadata
-        st.subheader("Portfolio Metadata")
+
         report_name = st.text_input("Report name", value="Portfolio Risk Analysis")
         portfolio_value = st.number_input("Portfolio value", value=1000000.0, step=100000.0)
         rf_rate = st.slider("Risk-free rate (annual %)", 0.0, 10.0, 2.0, 0.1) / 100.0
-        
-        # Risk parameters
-        st.subheader("Risk Analysis Parameters")
+
         confidence = st.slider("Confidence level", 0.85, 0.99, DEFAULT_CONFIDENCE, 0.01)
         num_sims = st.selectbox("Number of simulations", options=[10000, 50000, 100000], index=1)
-        
-        # Correlation method
         corr_method = st.selectbox("Covariance method", options=["Classical", "EWMA"], index=0)
         ewma_decay = st.slider("EWMA decay factor", 0.90, 0.99, DEFAULT_EWMA_DECAY, 0.01) if corr_method == "EWMA" else DEFAULT_EWMA_DECAY
-        
-        # Distribution
         dist_type = st.selectbox("Distribution type", options=["Student-t", "Gaussian"], index=0)
-        
-        # Risk Budgeting & Factor settings
-        st.subheader("Risk Decomposition Settings")
         show_factor_buckets = st.checkbox("Show factor bucket analysis", value=True)
         display_mode = st.radio("Exposure display mode", options=["Weighted portfolio exposure", "Standalone beta"], index=0)
-    
+
+        uploaded_fund_raws: dict[str, pd.DataFrame] = {}
+        uploaded_fund_names: list[str] = []
+        factor_raw: pd.DataFrame | None = None
+
+        if fund_uploads:
+            st.subheader("4. Fund Mapping")
+            for upload in fund_uploads:
+                try:
+                    fund_raw = read_uploaded_file(upload.name, upload.getvalue())
+                except Exception as exc:
+                    st.error(f"{upload.name}: {exc}")
+                    continue
+
+                if fund_raw.empty:
+                    st.error(f"{upload.name} is empty.")
+                    continue
+
+                uploaded_fund_raws[upload.name] = fund_raw
+                uploaded_fund_names.append(upload.name)
+
+                numeric_guess = [
+                    col for col in fund_raw.columns
+                    if col != date_col and pd.to_numeric(fund_raw[col], errors="coerce").notna().mean() > 0.5
+                ]
+                if not numeric_guess:
+                    st.error(f"{upload.name} has no numeric return columns.")
+                    continue
+
+                st.caption(upload.name)
+                st.text_input(
+                    f"Fund name for {upload.name}",
+                    value=infer_fund_name_from_file(upload.name),
+                    key=f"fund_name_{upload.name}",
+                )
+                st.selectbox(
+                    f"Return column in {upload.name}",
+                    options=numeric_guess,
+                    index=0,
+                    key=f"fund_return_{upload.name}",
+                )
+                st.number_input(
+                    f"Weight for {upload.name}",
+                    value=float(1.0 / max(len(fund_uploads), 1)),
+                    min_value=0.0,
+                    step=0.05,
+                    key=f"fund_weight_{upload.name}",
+                )
+
+        if factor_upload is not None:
+            try:
+                factor_raw = read_uploaded_file(factor_upload.name, factor_upload.getvalue())
+            except Exception as exc:
+                st.error(str(exc))
+                factor_raw = None
+
+        run_clicked = st.button("Run Analysis", type="primary")
+
+        if run_clicked:
+            if not fund_uploads:
+                st.error("Upload at least one fund file.")
+                st.stop()
+            if factor_upload is None:
+                st.error("Upload a factor file.")
+                st.stop()
+
+            if factor_raw is None:
+                st.stop()
+
+            if factor_raw.empty:
+                st.error("Factor file is empty.")
+                st.stop()
+
+            factor_cols = [col for col in factor_raw.columns if col != date_col]
+            if not factor_cols:
+                st.error("Factor file must contain at least one factor return column.")
+                st.stop()
+
+            factor_frame = prepare_factor_stream(
+                factor_raw,
+                date_col=date_col,
+                factor_cols=factor_cols,
+                values_in_percent=values_in_percent,
+            )
+
+            fund_frames: dict[str, pd.DataFrame] = {}
+            fund_weights: dict[str, float] = {}
+            fund_return_cols: dict[str, str] = {}
+
+            for upload in fund_uploads:
+                fund_raw = uploaded_fund_raws.get(upload.name)
+                if fund_raw is None:
+                    continue
+
+                numeric_guess = [
+                    col for col in fund_raw.columns
+                    if col != date_col and pd.to_numeric(fund_raw[col], errors="coerce").notna().mean() > 0.5
+                ]
+                if not numeric_guess:
+                    continue
+
+                stream_name = st.session_state.get(f"fund_name_{upload.name}", infer_fund_name_from_file(upload.name))
+                return_col = st.session_state.get(f"fund_return_{upload.name}", numeric_guess[0])
+                fund_weight = float(st.session_state.get(f"fund_weight_{upload.name}", 1.0 / max(len(fund_uploads), 1)))
+
+                prepared_stream = prepare_return_stream(
+                    fund_raw,
+                    date_col=date_col,
+                    return_col=return_col,
+                    stream_name=stream_name,
+                    values_in_percent=values_in_percent,
+                )
+                fund_frames[stream_name] = prepared_stream
+                fund_weights[stream_name] = fund_weight
+                fund_return_cols[stream_name] = return_col
+
+            merged = merge_analysis_frames(fund_frames, factor_frame, join_type="inner")
+
+            if merged.empty:
+                st.error("No overlapping dates remained after merging fund and factor files.")
+                st.stop()
+
+            if len(merged) < MIN_OBSERVATIONS:
+                st.error(f"Merged dataset has {len(merged)} rows; need at least {MIN_OBSERVATIONS}.")
+                st.stop()
+
+            st.session_state.analysis_ready = True
+            st.session_state.merged_data = merged
+            st.session_state.fund_frames = fund_frames
+            st.session_state.fund_weights = fund_weights
+            st.session_state.fund_return_cols = fund_return_cols
+            st.session_state.factor_frame = factor_frame
+            st.session_state.factor_cols = factor_cols
+
+    if not st.session_state.analysis_ready or st.session_state.merged_data is None:
+        st.info("Upload all fund files and the factor file, then click Run Analysis.")
+        st.stop()
+
+    merged_data = st.session_state.merged_data
+    fund_frames = st.session_state.fund_frames
+    fund_weights = st.session_state.fund_weights
+    factor_frame = st.session_state.factor_frame
+    factor_cols = st.session_state.factor_cols
+    asset_cols = list(fund_frames.keys())
+
+    if asset_cols:
+        weight_series = pd.Series(fund_weights, dtype=float).reindex(asset_cols).fillna(0.0)
+    else:
+        weight_series = pd.Series(dtype=float)
+    asset_weight_input = weight_series if not weight_series.empty else None
+    raw_df = merged_data.reset_index()
+    factor_df = factor_frame.reset_index()
+
+    # Column mapping
+    st.subheader("Column Mapping")
+    st.caption("Fund files are uploaded separately. Select dates and confirm the factor columns from the factor file.")
+    all_cols = raw_df.columns.tolist()
+    date_col = st.selectbox("Date column", options=all_cols, index=0)
+
+    if not factor_cols:
+        factor_cols = [col for col in factor_df.columns if col != date_col]
+    if not factor_cols:
+        st.error("No factor columns available in the factor file.")
+        st.stop()
     # ========== VALIDATION ==========
     errors, warnings_list = validate_raw_data(
         raw_df,

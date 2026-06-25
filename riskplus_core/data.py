@@ -21,6 +21,72 @@ def read_uploaded_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
     raise ValueError('Unsupported file type. Upload CSV or Excel.')
 
 
+def infer_fund_name_from_file(file_name: str) -> str:
+    name = file_name.rsplit('.', 1)[0]
+    name = name.replace('_', ' ').replace('-', ' ')
+    return name.strip() or 'Fund'
+
+
+def prepare_return_stream(
+    df: pd.DataFrame,
+    date_col: str,
+    return_col: str,
+    stream_name: str,
+    values_in_percent: bool,
+) -> pd.DataFrame:
+    frame = df[[date_col, return_col]].copy()
+    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce')
+    frame[return_col] = pd.to_numeric(frame[return_col], errors='coerce')
+    frame = frame.dropna().sort_values(date_col)
+    frame = frame.drop_duplicates(subset=[date_col], keep='first')
+    frame = frame.set_index(date_col)
+    if values_in_percent:
+        frame[return_col] = frame[return_col] / 100.0
+    return frame.rename(columns={return_col: stream_name})
+
+
+def prepare_factor_stream(
+    df: pd.DataFrame,
+    date_col: str,
+    factor_cols: list[str],
+    values_in_percent: bool,
+) -> pd.DataFrame:
+    frame = df[[date_col, *factor_cols]].copy()
+    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce')
+    for col in factor_cols:
+        frame[col] = pd.to_numeric(frame[col], errors='coerce')
+    frame = frame.dropna().sort_values(date_col)
+    frame = frame.drop_duplicates(subset=[date_col], keep='first')
+    frame = frame.set_index(date_col)
+    if values_in_percent:
+        frame[factor_cols] = frame[factor_cols] / 100.0
+    return frame
+
+
+def merge_analysis_frames(
+    fund_frames: dict[str, pd.DataFrame],
+    factor_frame: pd.DataFrame,
+    join_type: str = 'inner',
+) -> pd.DataFrame:
+    if not fund_frames:
+        raise ValueError('Upload at least one fund return file.')
+    if factor_frame.empty:
+        raise ValueError('Factor file is empty.')
+
+    merged = None
+    for fund_name, frame in fund_frames.items():
+        if merged is None:
+            merged = frame.copy()
+        else:
+            merged = merged.join(frame, how=join_type)
+
+    assert merged is not None
+    merged = merged.join(factor_frame, how=join_type)
+    merged = merged.sort_index()
+    merged = merged.dropna()
+    return merged
+
+
 def validate_raw_data(
     df: pd.DataFrame,
     date_col: str,
