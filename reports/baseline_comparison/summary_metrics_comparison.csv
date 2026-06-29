@@ -1,0 +1,6 @@
+metric,baseline_value,app_value
+portfolio_name,Current 7.26,Portfolio
+number_of_assets,37,37
+confidence_level,95,
+annualized_risk_free_rate,4,
+frequency,EWMA,monthly

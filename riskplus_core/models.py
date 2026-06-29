@@ -53,6 +53,8 @@ class CoreAnalysisResults:
     portfolio: pd.Series | None = None
     asset_weights: pd.Series | None = None
     factors: pd.DataFrame | None = None
+    simulated_fund_returns: pd.DataFrame | None = None
+    simulated_portfolio_returns: pd.Series | None = None
     simulated_returns: pd.DataFrame | None = None
     hist_stats: dict[str, float] = field(default_factory=dict)
     sim_stats: dict[str, float] = field(default_factory=dict)
@@ -63,3 +65,25 @@ class CoreAnalysisResults:
     rb_etl: pd.DataFrame | None = None
     rb_stdev: pd.DataFrame | None = None
     bucket_exposures: pd.DataFrame | None = None
+    data_source_metadata: dict[str, Any] = field(default_factory=dict)
+    fund_returns_full: pd.DataFrame | None = None
+    factor_returns_full: pd.DataFrame | None = None
+    fund_factor_overlap: pd.DataFrame | None = None
+
+
+@dataclass(slots=True)
+class NormalizedDataSource:
+    """Normalized input bundle shared across the supported upload modes."""
+
+    mode: str
+    merged_fund_returns: pd.DataFrame
+    factor_returns: pd.DataFrame
+    analysis_data: pd.DataFrame
+    asset_cols: list[str]
+    factor_cols: list[str]
+    asset_weight_input: pd.Series
+    data_source_metadata: dict[str, Any] = field(default_factory=dict)
+    weight_source_metadata: dict[str, Any] = field(default_factory=dict)
+    fund_returns_full: pd.DataFrame | None = None
+    factor_returns_full: pd.DataFrame | None = None
+    fund_factor_overlap: pd.DataFrame | None = None

@@ -16,51 +16,123 @@ from .analytics import (
 )
 from .data import annualization_factor, build_portfolio_series, detect_frequency, run_ols
 from .factors import get_factor_bucket_mapping
-from .models import CoreAnalysisResults
+from .models import CoreAnalysisResults, NormalizedDataSource
+
+
+def _coerce_bundle(
+    analysis_input: pd.DataFrame | NormalizedDataSource | dict[str, object],
+    asset_cols: list[str] | None,
+    factor_cols: list[str] | None,
+    asset_weight_input: pd.Series | dict[str, float] | list[float] | np.ndarray | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str], list[str], pd.Series | dict[str, float] | list[float] | np.ndarray | None, dict[str, object]]:
+    if isinstance(analysis_input, NormalizedDataSource):
+        return (
+            analysis_input.merged_fund_returns,
+            analysis_input.factor_returns,
+            analysis_input.analysis_data,
+            analysis_input.asset_cols,
+            analysis_input.factor_cols,
+            analysis_input.asset_weight_input,
+            analysis_input.data_source_metadata,
+        )
+
+    if isinstance(analysis_input, dict) and 'merged_fund_returns' in analysis_input and 'analysis_data' in analysis_input:
+        return (
+            analysis_input['merged_fund_returns'],
+            analysis_input['factor_returns'],
+            analysis_input['analysis_data'],
+            list(analysis_input['asset_cols']),
+            list(analysis_input['factor_cols']),
+            analysis_input['asset_weight_input'],
+            dict(analysis_input.get('data_source_metadata', {})),
+        )
+
+    if asset_cols is None or factor_cols is None:
+        raise ValueError('asset_cols and factor_cols are required when passing a dataframe to run_core_analysis.')
+
+    metadata = {
+        'mode': 'legacy_dataframe',
+        'warnings': [],
+    }
+    if isinstance(analysis_input, pd.DataFrame):
+        return analysis_input, analysis_input[factor_cols], analysis_input, asset_cols, factor_cols, asset_weight_input, metadata
+
+    raise TypeError('Unsupported analysis input type.')
 
 
 def run_core_analysis(
-    filtered_data: pd.DataFrame,
-    asset_cols: list[str],
-    factor_cols: list[str],
-    asset_weight_input: pd.Series | dict[str, float] | list[float] | np.ndarray | None,
-    rf_rate: float,
-    confidence: float,
-    num_sims: int,
+    filtered_data: pd.DataFrame | NormalizedDataSource | dict[str, object],
+    asset_cols: list[str] | None = None,
+    factor_cols: list[str] | None = None,
+    asset_weight_input: pd.Series | dict[str, float] | list[float] | np.ndarray | None = None,
+    rf_rate: float = 0.02,
+    confidence: float = 0.95,
+    num_sims: int = 50000,
     random_seed: int = 42,
 ) -> CoreAnalysisResults:
     """Run the existing single-portfolio analysis pipeline and return structured outputs."""
-    frequency = detect_frequency(filtered_data.index)
-    portfolio, asset_weights = build_portfolio_series(filtered_data, asset_cols, asset_weight_input)
-    factors = filtered_data[factor_cols]
+    merged_fund_returns, factor_returns, analysis_data, asset_cols, factor_cols, asset_weight_input, metadata = _coerce_bundle(
+        filtered_data,
+        asset_cols,
+        factor_cols,
+        asset_weight_input,
+    )
 
-    ols_results = run_ols(portfolio, factors)
+    portfolio_history = merged_fund_returns[asset_cols].dropna()
+    if portfolio_history.empty:
+        raise ValueError('No usable fund return rows were found after alignment.')
+
+    frequency = detect_frequency(portfolio_history.index)
+    portfolio, asset_weights = build_portfolio_series(portfolio_history, asset_cols, asset_weight_input)
     hist_stats = compute_historical_stats(portfolio, frequency, rf_rate)
 
-    simulated_returns = simulate_fat_tailed_returns(portfolio, n_sims=int(num_sims), random_seed=random_seed)
-    sim_stats = compute_historical_stats(simulated_returns['Portfolio'], 'monthly', rf_rate)
+    simulated_portfolio_returns = simulate_fat_tailed_returns(portfolio, n_sims=int(num_sims), random_seed=random_seed)['Portfolio']
+    simulated_fund_returns = simulate_fat_tailed_returns(portfolio_history, n_sims=int(num_sims), random_seed=random_seed)
+    sim_stats = compute_historical_stats(simulated_portfolio_returns, frequency, rf_rate)
 
-    mc_contribs = compute_marginal_risk_contributions(np.array([1.0]), simulated_returns, confidence)
-    sys_spec = compute_systematic_specific_risk(portfolio, factors, ols_results['model'])
+    required_cols = asset_cols + factor_cols
+    if set(required_cols).issubset(analysis_data.columns):
+        combined = analysis_data[required_cols].dropna()
+    else:
+        combined = pd.concat([portfolio_history, factor_returns[factor_cols]], axis=1, join='inner').dropna()
+    if combined.empty:
+        raise ValueError(
+            'No overlapping usable rows were found between fund returns and factor returns. '
+            'Check the upload dates, selected columns, and scaling.'
+        )
+    if len(combined) < max(2, len(factor_cols) + 1):
+        raise ValueError(
+            f'Only {len(combined)} overlapping rows remain after alignment; '
+            f'need at least {max(2, len(factor_cols) + 1)} rows for factor regression.'
+        )
+
+    portfolio_input = combined[asset_cols]
+    portfolio_for_factor_model, _ = build_portfolio_series(portfolio_input, asset_cols, asset_weights)
+    factors = combined[factor_cols]
+
+    ols_results = run_ols(portfolio_for_factor_model, factors)
+
+    mc_contribs = compute_marginal_risk_contributions(asset_weights.values, simulated_fund_returns, confidence)
+    sys_spec = compute_systematic_specific_risk(portfolio_for_factor_model, factors, ols_results['model'])
     factor_contrib = compute_factor_contribution(
         ols_results['model'],
         factors,
-        portfolio,
-        simulated_returns['Portfolio'],
+        portfolio_for_factor_model,
+        simulated_portfolio_returns,
         confidence,
     )
 
     rb_etl = compute_risk_budgeting_table(
-        np.array([1.0]),
-        simulated_returns,
+        asset_weights.values,
+        simulated_fund_returns,
         mc_contribs['mc_etl'],
         'ETL',
         rf_rate,
         annualization_factor(frequency),
     )
     rb_stdev = compute_risk_budgeting_table(
-        np.array([1.0]),
-        simulated_returns,
+        asset_weights.values,
+        simulated_fund_returns,
         mc_contribs['mc_vol'],
         'StDev',
         rf_rate,
@@ -75,7 +147,9 @@ def run_core_analysis(
         portfolio=portfolio,
         asset_weights=asset_weights,
         factors=factors,
-        simulated_returns=simulated_returns,
+        simulated_fund_returns=simulated_fund_returns,
+        simulated_portfolio_returns=simulated_portfolio_returns,
+        simulated_returns=simulated_portfolio_returns.to_frame(name='Portfolio'),
         hist_stats=hist_stats,
         sim_stats=sim_stats,
         ols_results=ols_results,
@@ -85,4 +159,8 @@ def run_core_analysis(
         rb_etl=rb_etl,
         rb_stdev=rb_stdev,
         bucket_exposures=bucket_exposures,
+        data_source_metadata=metadata,
+        fund_returns_full=merged_fund_returns,
+        factor_returns_full=factor_returns,
+        fund_factor_overlap=analysis_data,
     )

@@ -1,0 +1,14 @@
+setting,value
+portfolio_name,Current 7.26
+portfolio_value,1000000
+number_of_assets,37
+backfill,No
+factor_model,Template General Factor Model
+distribution_type,Asymmetric Student-t
+correlation_method,EWMA
+stress_tests,11
+analysis_period,07/31/2019 - 04/30/2026
+time_window,81
+confidence_level,95
+annualized_risk_free_rate,4
+currency,USD

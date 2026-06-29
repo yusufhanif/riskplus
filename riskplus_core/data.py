@@ -43,7 +43,7 @@ def prepare_return_stream(
     values_in_percent: bool,
 ) -> pd.DataFrame:
     frame = df[[date_col, return_col]].copy()
-    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce')
+    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce').dt.normalize()
     frame[return_col] = pd.to_numeric(frame[return_col], errors='coerce')
     frame = frame.dropna().sort_values(date_col)
     frame = frame.drop_duplicates(subset=[date_col], keep='first')
@@ -60,7 +60,7 @@ def prepare_factor_stream(
     values_in_percent: bool,
 ) -> pd.DataFrame:
     frame = df[[date_col, *factor_cols]].copy()
-    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce')
+    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce').dt.normalize()
     for col in factor_cols:
         frame[col] = pd.to_numeric(frame[col], errors='coerce')
     frame = frame.dropna().sort_values(date_col)
@@ -139,17 +139,15 @@ def prepare_analysis_data(
     factor_cols: list[str],
     values_in_percent: bool,
 ) -> pd.DataFrame:
+    """Prepare the merged analysis frame without applying scaling twice."""
     frame = df[[date_col, *asset_cols, *factor_cols]].copy()
-    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce')
+    frame[date_col] = pd.to_datetime(frame[date_col], errors='coerce').dt.normalize()
     for col in [*asset_cols, *factor_cols]:
         frame[col] = pd.to_numeric(frame[col], errors='coerce')
 
     frame = frame.dropna().sort_values(date_col)
     frame = frame.drop_duplicates(subset=[date_col], keep='first')
     frame = frame.set_index(date_col)
-
-    if values_in_percent:
-        frame[[*asset_cols, *factor_cols]] = frame[[*asset_cols, *factor_cols]] / 100.0
 
     return frame
 
