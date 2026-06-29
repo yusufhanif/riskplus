@@ -17,57 +17,174 @@ Default parameters: 95% confidence level, 0.94 EWMA decay, 50,000 simulations.
 
 from __future__ import annotations
 
-from io import BytesIO
-from typing import Any
 import warnings
+from typing import Any
 
-import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import scipy.stats as stats
-import statsmodels.api as sm
 import streamlit as st
-from statsmodels.stats.outliers_influence import variance_inflation_factor
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from riskplus_core.analytics import (
-    DEFAULT_CONFIDENCE,
-    DEFAULT_NUM_SIMULATIONS,
-    DEFAULT_RF_RATE,
-    DEFAULT_STUDENT_T_DF,
-    compute_factor_bucket_exposures,
-    compute_factor_contribution,
-    compute_historical_stats,
-    compute_implied_returns,
-    compute_marginal_risk_contributions,
-    compute_percent_risk_contributions,
-    compute_risk_budgeting_table,
-    compute_risk_metrics_from_dist,
-    compute_systematic_specific_risk,
-    fit_student_t_distribution,
-    get_factor_bucket_mapping,
-    simulate_fat_tailed_returns,
-)
+from riskplus_core.constants import DEFAULT_CONFIDENCE
+from riskplus_core.engine import run_core_analysis
 from riskplus_core.data import (
     MIN_OBSERVATIONS,
-    annualization_factor,
-    build_portfolio_series,
-    compute_vif,
-    detect_frequency,
     infer_fund_name_from_file,
     merge_analysis_frames,
     prepare_factor_stream,
     prepare_return_stream,
     prepare_analysis_data,
     read_uploaded_file,
-    run_ols,
     validate_raw_data,
+)
+from riskplus_core.reporting import (
+    make_cumulative_growth_chart,
+    make_exposure_chart,
+    make_factor_bucket_chart,
+    make_factor_bucket_table,
+    make_factor_exposure_table,
+    make_factor_level_contribution_table,
+    make_historical_risk_table,
+    make_historical_vs_simulated_table,
+    make_portfolio_pie_chart,
+    make_risk_budgeting_chart,
+    make_settings_table,
+    make_simulated_distribution_chart,
+    make_simulated_risk_table,
+    make_tail_risk_table,
+    make_traditional_measures_table,
 )
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 DEFAULT_EWMA_DECAY = 0.94
+
+
+def render_index_tab(
+    asset_cols: list[str],
+    report_name: str,
+    portfolio_value: float,
+    factor_cols: list[str],
+    dist_type: str,
+    corr_method: str,
+    selected_dates: tuple[object, object],
+    observations: int,
+    confidence: float,
+    rf_rate: float,
+    num_sims: int,
+    fig_pie,
+) -> None:
+    st.header("Analysis Index & Settings")
+    st.subheader("Calculation Settings")
+    settings_table = make_settings_table(
+        report_name,
+        portfolio_value,
+        asset_cols,
+        factor_cols,
+        dist_type,
+        corr_method,
+        selected_dates,
+        observations,
+        confidence,
+        rf_rate,
+        num_sims,
+    )
+    st.dataframe(settings_table, hide_index=True, use_container_width=True)
+
+    st.subheader("Portfolio Composition")
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.subheader("Quick Links")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("📈 **SUMMARY**  \nKey metrics and risk overview")
+    with col2:
+        st.info("📊 **HISTORICAL RISK**  \nDetailed historical statistics")
+    with col3:
+        st.info("🎲 **SIMULATED RISK**  \nFat-tail risk metrics")
+
+
+def render_summary_tab(hist_stats: dict[str, float], sim_stats: dict[str, float], ols_results: dict[str, object], sys_spec: dict[str, Any], simulated_returns: pd.DataFrame) -> None:
+    st.header("Risk Summary")
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+    with col_kpi1:
+        st.metric("Ann. Return", f"{hist_stats['ann_mean']:.2%}")
+    with col_kpi2:
+        st.metric("Ann. Volatility", f"{hist_stats['ann_vol']:.2%}")
+    with col_kpi3:
+        st.metric("Sharpe Ratio", f"{hist_stats['sharpe']:.2f}")
+    with col_kpi4:
+        st.metric("VaR (95%)", f"{hist_stats['var']:.2%}")
+
+    st.subheader("Simulated Return Distribution (Student-t)")
+    st.plotly_chart(make_simulated_distribution_chart(simulated_returns, sim_stats), use_container_width=True)
+
+    col_trad, col_tail = st.columns(2)
+    with col_trad:
+        st.subheader("Traditional Measures")
+        st.table(make_traditional_measures_table(hist_stats))
+    with col_tail:
+        st.subheader("Tail Risk Measures")
+        st.table(make_tail_risk_table(hist_stats))
+
+    st.subheader("Factor Model Diagnostics")
+    col_r2, col_sys = st.columns(2)
+    with col_r2:
+        st.metric("Model R²", f"{ols_results['r2']:.3f}")
+    with col_sys:
+        st.metric("Systematic Risk %", f"{sys_spec['systematic_pct']:.1%}")
+
+    st.subheader("Factor Exposures & Significance")
+    st.dataframe(make_factor_exposure_table(ols_results), use_container_width=True)
+
+
+def render_historical_risk_tab(hist_stats: dict[str, float], portfolio: pd.Series) -> None:
+    st.header("Historical Risk Statistics")
+    st.caption("Actual historical period statistics")
+    st.dataframe(make_historical_risk_table(hist_stats), hide_index=True, use_container_width=True)
+    st.subheader("Cumulative Growth")
+    st.plotly_chart(make_cumulative_growth_chart(portfolio), use_container_width=True)
+
+
+def render_simulated_risk_tab(hist_stats: dict[str, float], sim_stats: dict[str, float], num_sims: int) -> None:
+    st.header("Simulated Risk Statistics")
+    st.caption(f"Based on {num_sims:,} Student-t Monte Carlo simulations")
+    st.dataframe(make_simulated_risk_table(sim_stats, num_sims), hide_index=True, use_container_width=True)
+    st.subheader("Historical vs. Simulated Comparison")
+    st.dataframe(make_historical_vs_simulated_table(hist_stats, sim_stats), hide_index=True, use_container_width=True)
+
+
+def render_risk_budgeting_tab(rb_table: pd.DataFrame, risk_label: str) -> None:
+    st.dataframe(rb_table, hide_index=True, use_container_width=True)
+    st.subheader("Risk-Return Analysis")
+    st.plotly_chart(make_risk_budgeting_chart(rb_table, risk_label), use_container_width=True)
+
+
+def render_factor_contribution_tab(factor_contrib: dict[str, Any], show_factor_buckets: bool) -> None:
+    st.header("Factor Contribution to Portfolio Risk")
+    st.caption("Percentage Contribution to Risk by factor bucket shows how a given factor bucket contributes to the overall portfolio risk.")
+    col_sys, col_spec = st.columns(2)
+    with col_sys:
+        st.metric("Systematic Risk (StDev %)", f"{factor_contrib['systematic_stdev_pct']:.1%}")
+    with col_spec:
+        st.metric("Specific/Idiosyncratic Risk (%)", f"{factor_contrib['specific_stdev_pct']:.1%}")
+
+    if show_factor_buckets and factor_contrib["bucket_mapping"]:
+        st.subheader("Factor Risk by Bucket")
+        bucket_df = make_factor_bucket_table(factor_contrib)
+        st.dataframe(bucket_df, hide_index=True, use_container_width=True)
+        st.plotly_chart(make_factor_bucket_chart(bucket_df), use_container_width=True)
+
+    st.subheader("Factor-Level Contributions")
+    st.dataframe(make_factor_level_contribution_table(factor_contrib), hide_index=True, use_container_width=True)
+
+
+def render_exposure_tab(bucket_exposures: pd.DataFrame) -> None:
+    st.header("Exposure by Factor Bucket")
+    st.caption("The sensitivity of the portfolio toward each market segment (factor basket).")
+    if not bucket_exposures.empty:
+        st.subheader("Portfolio Exposure by Bucket")
+        st.dataframe(bucket_exposures, hide_index=True, use_container_width=True)
+        st.plotly_chart(make_exposure_chart(bucket_exposures), use_container_width=True)
+    else:
+        st.info("Not enough factor data for exposure decomposition. Ensure you have multiple factors selected.")
 
 def main() -> None:
     st.set_page_config(page_title="RiskPlus Streamlit", layout="wide")
@@ -329,28 +446,24 @@ def main() -> None:
         st.stop()
     
     # ========== CORE ANALYSIS ==========
-    freq = detect_frequency(filtered.index)
-    portfolio, asset_weights = build_portfolio_series(filtered, asset_cols, asset_weight_input)
-    factors = filtered[factor_cols]
-    
-    # Run OLS factor model
-    ols_results = run_ols(portfolio, factors)
-    hist_stats = compute_historical_stats(portfolio, freq, rf_rate)
-    
-    # Simulate fat-tailed returns
-    simulated_returns = simulate_fat_tailed_returns(
-        portfolio, n_sims=int(num_sims), random_seed=42
+    core_results = run_core_analysis(
+        filtered,
+        asset_cols,
+        factor_cols,
+        asset_weight_input,
+        rf_rate,
+        confidence,
+        int(num_sims),
+        random_seed=42,
     )
-    sim_stats = compute_historical_stats(simulated_returns["Portfolio"], "monthly", rf_rate)
-    
-    # Risk contributions (using simulated returns)
-    weights = np.array([1.0])  # Portfolio only has one "asset"
-    mc_contribs = compute_marginal_risk_contributions(weights, simulated_returns, confidence)
-    
-    # Systematic vs specific
-    sys_spec = compute_systematic_specific_risk(portfolio, factors, ols_results["model"])
 
-    portfolio_label = "Portfolio" if len(asset_cols) == 1 else "Aggregated Portfolio"
+    portfolio = core_results.portfolio
+    asset_weights = core_results.asset_weights
+    ols_results = core_results.ols_results
+    hist_stats = core_results.hist_stats
+    sim_stats = core_results.sim_stats
+    simulated_returns = core_results.simulated_returns
+    sys_spec = core_results.sys_spec
     
     # ========== TABS: INDEX, SUMMARY, HISTORICAL RISK, SIMULATED RISK ==========
     tabs = st.tabs(["INDEX", "SUMMARY", "HISTORICAL RISK", "SIMULATED RISK", 
@@ -359,420 +472,52 @@ def main() -> None:
     
     # ===== TAB 1: INDEX =====
     with tabs[0]:
-        st.header("Analysis Index & Settings")
-        
-        # Calculation settings table
-        settings_data = {
-            "Parameter": [
-                "Report Name",
-                "Portfolio Value",
-                "Number of Funds",
-                "Factor Model",
-                "Distribution Type",
-                "Correlation Method",
-                "Analysis Period",
-                "Observations",
-                "Confidence Level",
-                "Risk-Free Rate (annual)",
-                "Number of Simulations",
-            ],
-            "Value": [
-                report_name,
-                f"${portfolio_value:,.0f}",
-                len(asset_cols),
-                f"OLS ({len(factor_cols)} factors)",
-                dist_type,
-                corr_method,
-                f"{selected_dates[0]} to {selected_dates[1]}",
-                len(filtered),
-                f"{confidence:.1%}",
-                f"{rf_rate:.2%}",
-                f"{num_sims:,}",
-            ],
-        }
-        st.subheader("Calculation Settings")
-        st.dataframe(pd.DataFrame(settings_data), hide_index=True, use_container_width=True)
-        
-        # Portfolio composition
-        st.subheader("Portfolio Composition")
-        comp_data = {
-            "Asset": asset_cols + factor_cols,
-            "Weight": list(asset_weights.values) + [0.0] * len(factor_cols),
-        }
-        fig_pie = px.pie(
-            values=list(asset_weights.values),
-            names=asset_cols,
-            title="Portfolio Structure",
+        render_index_tab(
+            asset_cols,
+            report_name,
+            portfolio_value,
+            factor_cols,
+            dist_type,
+            corr_method,
+            selected_dates,
+            len(filtered),
+            confidence,
+            rf_rate,
+            num_sims,
+            make_portfolio_pie_chart(asset_cols, asset_weights),
         )
-        st.plotly_chart(fig_pie, use_container_width=True)
-        
-        # Navigation
-        st.subheader("Quick Links")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.info("📈 **SUMMARY**  \nKey metrics and risk overview")
-        with col2:
-            st.info("📊 **HISTORICAL RISK**  \nDetailed historical statistics")
-        with col3:
-            st.info("🎲 **SIMULATED RISK**  \nFat-tail risk metrics")
     
     # ===== TAB 2: SUMMARY =====
     with tabs[1]:
-        st.header("Risk Summary")
-        
-        # Portfolio snapshot KPIs
-        col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-        with col_kpi1:
-            st.metric("Ann. Return", f"{hist_stats['ann_mean']:.2%}")
-        with col_kpi2:
-            st.metric("Ann. Volatility", f"{hist_stats['ann_vol']:.2%}")
-        with col_kpi3:
-            st.metric("Sharpe Ratio", f"{hist_stats['sharpe']:.2f}")
-        with col_kpi4:
-            st.metric("VaR (95%)", f"{hist_stats['var']:.2%}")
-        
-        # Simulated distribution
-        st.subheader("Simulated Return Distribution (Student-t)")
-        sim_rets = simulated_returns["Portfolio"].values
-        mean_ret = np.mean(sim_rets)
-        etl = sim_stats["etl"]
-        etr = sim_stats["etr"]
-        
-        fig_dist = go.Figure()
-        fig_dist.add_trace(go.Histogram(x=sim_rets, nbinsx=50, name="Simulated Returns"))
-        fig_dist.add_vline(x=-etl, line_dash="dash", line_color="red", annotation_text="VaR (95%)")
-        fig_dist.add_vline(x=mean_ret, line_dash="solid", line_color="green", annotation_text="Mean")
-        fig_dist.add_vline(x=etr, line_dash="dash", line_color="blue", annotation_text="ETR (95%)")
-        fig_dist.update_layout(title="Simulated Return Distribution", xaxis_title="Return", yaxis_title="Frequency")
-        st.plotly_chart(fig_dist, use_container_width=True)
-        
-        # Risk metrics comparison
-        col_trad, col_tail = st.columns(2)
-        with col_trad:
-            st.subheader("Traditional Measures")
-            trad_data = {
-                "Metric": ["Mean Return", "Volatility", "Sharpe Ratio"],
-                "Value": [
-                    f"{hist_stats['ann_mean']:.2%}",
-                    f"{hist_stats['ann_vol']:.2%}",
-                    f"{hist_stats['sharpe']:.2f}",
-                ],
-            }
-            st.table(pd.DataFrame(trad_data))
-        
-        with col_tail:
-            st.subheader("Tail Risk Measures")
-            tail_data = {
-                "Metric": ["VaR (95%)", "ETL (95%)", "STARR", "Rachev Ratio"],
-                "Value": [
-                    f"{hist_stats['var']:.2%}",
-                    f"{hist_stats['etl']:.2%}",
-                    f"{hist_stats['starr']:.2f}",
-                    f"{hist_stats['rachev']:.2f}",
-                ],
-            }
-            st.table(pd.DataFrame(tail_data))
-        
-        # Factor contributions
-        st.subheader("Factor Model Diagnostics")
-        col_r2, col_sys = st.columns(2)
-        with col_r2:
-            st.metric("Model R²", f"{ols_results['r2']:.3f}")
-        with col_sys:
-            st.metric("Systematic Risk %", f"{sys_spec['systematic_pct']:.1%}")
-        
-        # Top factors by contribution
-        st.subheader("Factor Exposures & Significance")
-        coef_display = ols_results["coef_table"].copy()
-        coef_display = coef_display[coef_display.index != "const"]
-        st.dataframe(coef_display[["Coefficient", "tStat", "pValue"]], use_container_width=True)
+        render_summary_tab(hist_stats, sim_stats, ols_results, sys_spec, simulated_returns)
     
     # ===== TAB 3: HISTORICAL RISK =====
     with tabs[2]:
-        st.header("Historical Risk Statistics")
-        st.caption("Actual historical period statistics")
-        
-        hist_risk_data = {
-            "Metric": [
-                "Observations",
-                "Mean Return",
-                "Annualized Mean",
-                "Volatility",
-                "Annualized Volatility",
-                "Skewness",
-                "Excess Kurtosis",
-                "VaR (95%)",
-                "ETL (95%)",
-                "ETR (95%)",
-                "Sharpe Ratio",
-                "STARR",
-                "Rachev Ratio",
-                "Max Drawdown",
-                "Best Period",
-                "Worst Period",
-            ],
-            "Portfolio": [
-                hist_stats["obs_count"],
-                f"{hist_stats['mean']:.4f}",
-                f"{hist_stats['ann_mean']:.2%}",
-                f"{hist_stats['vol']:.4f}",
-                f"{hist_stats['ann_vol']:.2%}",
-                f"{hist_stats['skew']:.3f}",
-                f"{hist_stats['xkurt']:.3f}",
-                f"{hist_stats['var']:.2%}",
-                f"{hist_stats['etl']:.2%}",
-                f"{hist_stats['etr']:.2%}",
-                f"{hist_stats['sharpe']:.3f}",
-                f"{hist_stats['starr']:.3f}",
-                f"{hist_stats['rachev']:.3f}",
-                f"{hist_stats['max_dd']:.2%}",
-                f"{hist_stats['best_period']:.2%}",
-                f"{hist_stats['worst_period']:.2%}",
-            ],
-        }
-        
-        hist_df = pd.DataFrame(hist_risk_data)
-        st.dataframe(hist_df, hide_index=True, use_container_width=True)
-        
-        # Cumulative return plot
-        st.subheader("Cumulative Growth")
-        wealth = (1 + portfolio).cumprod()
-        fig_wealth = px.line(
-            x=wealth.index,
-            y=wealth.values,
-            labels={"x": "Date", "y": "Growth of $1"},
-            title="Cumulative Portfolio Growth",
-        )
-        st.plotly_chart(fig_wealth, use_container_width=True)
+        render_historical_risk_tab(hist_stats, portfolio)
     
     # ===== TAB 4: SIMULATED RISK =====
     with tabs[3]:
-        st.header("Simulated Risk Statistics")
-        st.caption(f"Based on {num_sims:,} Student-t Monte Carlo simulations")
-        
-        sim_risk_data = {
-            "Metric": [
-                "Observations (simulated)",
-                "Mean Return",
-                "Annualized Mean",
-                "Volatility",
-                "Annualized Volatility",
-                "Skewness",
-                "Excess Kurtosis",
-                "VaR (95%)",
-                "ETL (95%)",
-                "ETR (95%)",
-                "Sharpe Ratio",
-                "STARR",
-                "Rachev Ratio",
-            ],
-            "Portfolio": [
-                int(num_sims),
-                f"{sim_stats['mean']:.4f}",
-                f"{sim_stats['ann_mean']:.2%}",
-                f"{sim_stats['vol']:.4f}",
-                f"{sim_stats['ann_vol']:.2%}",
-                f"{sim_stats['skew']:.3f}",
-                f"{sim_stats['xkurt']:.3f}",
-                f"{sim_stats['var']:.2%}",
-                f"{sim_stats['etl']:.2%}",
-                f"{sim_stats['etr']:.2%}",
-                f"{sim_stats['sharpe']:.3f}",
-                f"{sim_stats['starr']:.3f}",
-                f"{sim_stats['rachev']:.3f}",
-            ],
-        }
-        
-        sim_df = pd.DataFrame(sim_risk_data)
-        st.dataframe(sim_df, hide_index=True, use_container_width=True)
-        
-        # Comparison: Historical vs Simulated
-        st.subheader("Historical vs. Simulated Comparison")
-        comparison_data = {
-            "Metric": ["Ann. Mean", "Ann. Vol", "Sharpe", "VaR (95%)", "ETL (95%)", "Rachev"],
-            "Historical": [
-                f"{hist_stats['ann_mean']:.2%}",
-                f"{hist_stats['ann_vol']:.2%}",
-                f"{hist_stats['sharpe']:.2f}",
-                f"{hist_stats['var']:.2%}",
-                f"{hist_stats['etl']:.2%}",
-                f"{hist_stats['rachev']:.2f}",
-            ],
-            "Simulated": [
-                f"{sim_stats['ann_mean']:.2%}",
-                f"{sim_stats['ann_vol']:.2%}",
-                f"{sim_stats['sharpe']:.2f}",
-                f"{sim_stats['var']:.2%}",
-                f"{sim_stats['etl']:.2%}",
-                f"{sim_stats['rachev']:.2f}",
-            ],
-        }
-        st.dataframe(pd.DataFrame(comparison_data), hide_index=True, use_container_width=True)
+        render_simulated_risk_tab(hist_stats, sim_stats, num_sims)
     
     # ===== TAB 5: RISK BUDGETING (ETL) =====
     with tabs[4]:
         st.header("Risk Budgeting by ETL")
         st.caption("Implied Return is the return an asset must deliver to justify its contribution to portfolio ETL. Assets with actual returns above the implied line may justify increased weight; below may suggest reduction.")
-        
-        # Compute risk budgeting for ETL
-        rb_etl = compute_risk_budgeting_table(
-            np.array([1.0]),
-            simulated_returns,
-            mc_contribs["mc_etl"],
-            "ETL",
-            rf_rate,
-            annualization_factor(freq),
-        )
-        
-        # Display table
-        st.subheader("Risk Budgeting Table (ETL)")
-        st.dataframe(rb_etl, hide_index=True, use_container_width=True)
-        
-        # RiskPlus-style chart: MC to ETL vs Return
-        st.subheader("Risk-Return Analysis")
-        fig_rb_etl = px.scatter(
-            rb_etl,
-            x="MC to Risk",
-            y="Mean Return (%)",
-            hover_data=["Asset", "Status"],
-            labels={"MC to Risk": "Marginal Contribution to ETL", "Mean Return (%)": "Expected Return (%)"},
-            title="Mean Return vs. Marginal ETL Contribution",
-        )
-        # Add implied return line as scatter
-        fig_rb_etl.add_scatter(
-            x=rb_etl["MC to Risk"],
-            y=rb_etl["Implied Return (%)"],
-            mode="lines+markers",
-            name="Implied Return (Risk-Adjusted)",
-            line=dict(dash="dash", color="red"),
-        )
-        st.plotly_chart(fig_rb_etl, use_container_width=True)
+        render_risk_budgeting_tab(core_results.rb_etl, "ETL")
     
     # ===== TAB 6: RISK BUDGETING (StDev) =====
     with tabs[5]:
         st.header("Risk Budgeting by Standard Deviation")
         st.caption("Implied Return is the return an asset must deliver to justify its contribution to portfolio standard deviation.")
-        
-        # Risk budgeting for StDev
-        rb_stdev = compute_risk_budgeting_table(
-            np.array([1.0]),
-            simulated_returns,
-            mc_contribs["mc_vol"],
-            "StDev",
-            rf_rate,
-            annualization_factor(freq),
-        )
-        
-        st.subheader("Risk Budgeting Table (StDev)")
-        st.dataframe(rb_stdev, hide_index=True, use_container_width=True)
-        
-        st.subheader("Risk-Return Analysis")
-        fig_rb_stdev = px.scatter(
-            rb_stdev,
-            x="MC to Risk",
-            y="Mean Return (%)",
-            hover_data=["Asset", "Status"],
-            labels={"MC to Risk": "Marginal Contribution to StDev", "Mean Return (%)": "Expected Return (%)"},
-            title="Mean Return vs. Marginal StDev Contribution",
-        )
-        fig_rb_stdev.add_scatter(
-            x=rb_stdev["MC to Risk"],
-            y=rb_stdev["Implied Return (%)"],
-            mode="lines+markers",
-            name="Implied Return (Risk-Adjusted)",
-            line=dict(dash="dash", color="red"),
-        )
-        st.plotly_chart(fig_rb_stdev, use_container_width=True)
+        render_risk_budgeting_tab(core_results.rb_stdev, "StDev")
     
     # ===== TAB 7: FACTOR CONTRIBUTION =====
     with tabs[6]:
-        st.header("Factor Contribution to Portfolio Risk")
-        st.caption("Percentage Contribution to Risk by factor bucket shows how a given factor bucket contributes to the overall portfolio risk.")
-        
-        factor_contrib = compute_factor_contribution(
-            ols_results["model"],
-            factors,
-            portfolio,
-            simulated_returns["Portfolio"],
-            confidence,
-        )
-        
-        # Section 1: Systematic vs Specific
-        col_sys, col_spec = st.columns(2)
-        with col_sys:
-            st.metric("Systematic Risk (StDev %)", f"{factor_contrib['systematic_stdev_pct']:.1%}")
-        with col_spec:
-            st.metric("Specific/Idiosyncratic Risk (%)", f"{factor_contrib['specific_stdev_pct']:.1%}")
-        
-        # Section 2: Factor bucketing
-        if show_factor_buckets and factor_contrib["bucket_mapping"]:
-            st.subheader("Factor Risk by Bucket")
-            
-            bucket_data = []
-            for bucket, factors_in_bucket in factor_contrib["bucket_mapping"].items():
-                bucket_contrib_stdev = sum([
-                    abs(factor_contrib["factor_mc_stdev"][i])
-                    for i, f in enumerate(factor_contrib["factor_names"])
-                    if f in factors_in_bucket
-                ]) / (np.sum(np.abs(factor_contrib["factor_mc_stdev"])) + 1e-10)
-                
-                bucket_data.append({
-                    "Factor Bucket": bucket,
-                    "PC to StDev (%)": bucket_contrib_stdev * 100,
-                    "Factor Count": len(factors_in_bucket),
-                })
-            
-            bucket_df = pd.DataFrame(bucket_data)
-            st.dataframe(bucket_df, hide_index=True, use_container_width=True)
-            
-            # Bucketing chart
-            fig_bucket = px.bar(
-                bucket_df,
-                x="Factor Bucket",
-                y="PC to StDev (%)",
-                title="Risk Contribution by Factor Bucket",
-                labels={"PC to StDev (%)": "Contribution to StDev (%)"},
-            )
-            st.plotly_chart(fig_bucket, use_container_width=True)
-        
-        # Section 3: Individual factors
-        st.subheader("Factor-Level Contributions")
-        factor_table = pd.DataFrame({
-            "Factor": factor_contrib["factor_names"],
-            "Beta": factor_contrib["betas"].values,
-            "MC to StDev": factor_contrib["factor_mc_stdev"],
-        })
-        st.dataframe(factor_table, hide_index=True, use_container_width=True)
+        render_factor_contribution_tab(core_results.factor_contrib, show_factor_buckets)
     
     # ===== TAB 8: EXPOSURE BY FACTOR BUCKET =====
     with tabs[7]:
-        st.header("Exposure by Factor Bucket")
-        st.caption("The sensitivity of the portfolio toward each market segment (factor basket).")
-        
-        # Compute exposures from OLS betas
-        betas = ols_results["coef_table"].index
-        betas_values = ols_results["coef_table"]["Coefficient"]
-        bucket_mapping = get_factor_bucket_mapping(factor_cols)
-        
-        bucket_exposures = compute_factor_bucket_exposures(
-            betas_values,
-            bucket_mapping,
-        )
-        
-        if not bucket_exposures.empty:
-            st.subheader("Portfolio Exposure by Bucket")
-            st.dataframe(bucket_exposures, hide_index=True, use_container_width=True)
-            
-            fig_exposure = px.bar(
-                bucket_exposures,
-                x="Bucket",
-                y="Exposure",
-                title="Portfolio Sensitivity by Factor Bucket",
-                labels={"Exposure": "Net Exposure"},
-            )
-            st.plotly_chart(fig_exposure, use_container_width=True)
-        else:
-            st.info("Not enough factor data for exposure decomposition. Ensure you have multiple factors selected.")
+        render_exposure_tab(core_results.bucket_exposures)
     
     # ========== FOOTER: METADATA & EXPORT =====
     st.sidebar.divider()

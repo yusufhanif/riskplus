@@ -1,3 +1,5 @@
+"""Data loading, validation, and compatibility helpers for RiskPlus Streamlit."""
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -5,11 +7,17 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 import streamlit as st
-from statsmodels.stats.outliers_influence import variance_inflation_factor
 
-MIN_OBSERVATIONS = 36
+from .constants import MIN_OBSERVATIONS
+from .risk import annualization_factor as _annualization_factor, detect_frequency as _detect_frequency
+from .factors import compute_vif as _compute_vif, run_ols as _run_ols
+from .portfolio import (
+    build_portfolio_composition_table,
+    build_portfolio_series as _build_portfolio_series,
+    filter_analysis_period,
+    normalize_weights,
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -61,30 +69,6 @@ def prepare_factor_stream(
     if values_in_percent:
         frame[factor_cols] = frame[factor_cols] / 100.0
     return frame
-
-
-def merge_analysis_frames(
-    fund_frames: dict[str, pd.DataFrame],
-    factor_frame: pd.DataFrame,
-    join_type: str = 'inner',
-) -> pd.DataFrame:
-    if not fund_frames:
-        raise ValueError('Upload at least one fund return file.')
-    if factor_frame.empty:
-        raise ValueError('Factor file is empty.')
-
-    merged = None
-    for fund_name, frame in fund_frames.items():
-        if merged is None:
-            merged = frame.copy()
-        else:
-            merged = merged.join(frame, how=join_type)
-
-    assert merged is not None
-    merged = merged.join(factor_frame, how=join_type)
-    merged = merged.sort_index()
-    merged = merged.dropna()
-    return merged
 
 
 def validate_raw_data(
@@ -170,74 +154,42 @@ def prepare_analysis_data(
     return frame
 
 
+def merge_analysis_frames(
+    fund_frames: dict[str, pd.DataFrame],
+    factor_frame: pd.DataFrame | None,
+    join_type: str = 'inner',
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = list(fund_frames.values())
+    if factor_frame is not None:
+        frames.append(factor_frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    merged = pd.concat(frames, axis=1, join=join_type).sort_index()
+    merged = merged.loc[:, ~merged.columns.duplicated()]
+    return merged
+
+
 def build_portfolio_series(
     data: pd.DataFrame,
     asset_cols: list[str],
-    asset_weights: pd.Series | None = None,
+    asset_weights: pd.Series | dict[str, float] | list[float] | np.ndarray | None = None,
 ) -> tuple[pd.Series, pd.Series]:
-    if asset_weights is None:
-        weights = np.repeat(1.0 / len(asset_cols), len(asset_cols))
-        asset_weights = pd.Series(weights, index=asset_cols, dtype=float)
-    else:
-        asset_weights = asset_weights.astype(float).reindex(asset_cols).fillna(0.0)
-        if float(asset_weights.sum()) <= 0:
-            asset_weights = pd.Series(np.repeat(1.0 / len(asset_cols), len(asset_cols)), index=asset_cols, dtype=float)
-
-    normalized_weights = asset_weights / float(asset_weights.sum())
-    portfolio_values = data[asset_cols].values @ normalized_weights.values
-    portfolio = pd.Series(portfolio_values, index=data.index, name='Portfolio')
-    return portfolio, normalized_weights
+    return _build_portfolio_series(data, asset_cols, asset_weights)
 
 
 def detect_frequency(index: pd.DatetimeIndex) -> str:
-    if len(index) < 3:
-        return 'unknown'
-    day_gaps = pd.Series(index).sort_values().diff().dropna().dt.days
-    median_gap = float(day_gaps.median())
-    if median_gap <= 3:
-        return 'daily'
-    if median_gap <= 40:
-        return 'monthly'
-    if median_gap <= 120:
-        return 'quarterly'
-    return 'unknown'
+    return _detect_frequency(index)
 
 
 def annualization_factor(freq: str) -> int:
-    return {'daily': 252, 'monthly': 12, 'quarterly': 4}.get(freq, 12)
+    return _annualization_factor(freq)
 
 
 def run_ols(portfolio_returns: pd.Series, factor_returns: pd.DataFrame) -> dict[str, Any]:
-    x = sm.add_constant(factor_returns, has_constant='add')
-    model = sm.OLS(portfolio_returns, x)
-    fitted = model.fit(cov_type='HC1')
-
-    coef_table = pd.DataFrame(
-        {
-            'Coefficient': fitted.params,
-            'StdError': fitted.bse,
-            'tStat': fitted.tvalues,
-            'pValue': fitted.pvalues,
-        }
-    )
-    coef_table.index.name = 'Term'
-    coef_table['Significant'] = coef_table['pValue'] < 0.05
-
-    return {
-        'model': fitted,
-        'coef_table': coef_table,
-        'residuals': fitted.resid,
-        'fitted_values': fitted.fittedvalues,
-        'r2': float(fitted.rsquared),
-        'adj_r2': float(fitted.rsquared_adj),
-    }
+    return _run_ols(portfolio_returns, factor_returns)
 
 
 def compute_vif(factor_returns: pd.DataFrame) -> pd.DataFrame:
-    x = sm.add_constant(factor_returns, has_constant='add')
-    vif_rows: list[dict[str, Any]] = []
-    for i, col in enumerate(x.columns):
-        if col == 'const':
-            continue
-        vif_rows.append({'Factor': col, 'VIF': variance_inflation_factor(x.values, i)})
-    return pd.DataFrame(vif_rows).sort_values('VIF', ascending=False)
+    return _compute_vif(factor_returns)
