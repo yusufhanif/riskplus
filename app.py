@@ -15,7 +15,7 @@ Historical analysis uses actual historical returns; simulated analysis uses Stud
 Default parameters: 95% confidence level, 0.94 EWMA decay, 50,000 simulations.
 """
 
-from __future__ import annotations
+from __future__ import annotations #what do these and the below ones do?
 
 from io import BytesIO
 import warnings
@@ -24,25 +24,32 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import streamlit as st
+
 from riskplus_core.constants import DEFAULT_CONFIDENCE
+
 from riskplus_core.engine import run_core_analysis
+
 from riskplus_core.data import MIN_OBSERVATIONS, infer_fund_name_from_file, read_uploaded_file
+
 from riskplus_core.data_sources import (
     prepare_combined_wide_file,
     prepare_separate_fund_files,
     prepare_wide_fund_file_plus_factor_file,
 )
 from riskplus_core.models import NormalizedDataSource
+
 from riskplus_core.quality import build_data_quality_report, validate_selected_panel
+
 from riskplus_core.weights import (
     build_asset_weight_series,
     detect_weight_columns,
     match_weight_names_to_assets,
     normalize_portfolio_weights,
     prepare_weights_table,
-    validate_portfolio_weights,
+    validate_portfolio_weights, #weights related in /riskplus_core/weights.py
 )
-from riskplus_core.reporting import (
+
+from riskplus_core.reporting import ( #creating charts in /reporting.py
     make_cumulative_growth_chart,
     make_exposure_chart,
     make_factor_bucket_chart,
@@ -59,247 +66,13 @@ from riskplus_core.reporting import (
     make_tail_risk_table,
     make_traditional_measures_table,
 )
-from riskplus_ui.report_tabs import render_report_tabs
+
+from riskplus_ui.report_tabs import render_report_tabs # rendering actually happens in riskplus_ui
 from riskplus_ui.workflow import AnalysisSettings, render_guided_workflow
 
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning) #what does this mean ?
 
-DEFAULT_EWMA_DECAY = 0.94
-
-
-def render_index_tab(
-    asset_cols: list[str],
-    report_name: str,
-    portfolio_value: float,
-    factor_cols: list[str],
-    dist_type: str,
-    corr_method: str,
-    selected_dates: tuple[object, object],
-    observations: int,
-    confidence: float,
-    rf_rate: float,
-    num_sims: int,
-    fig_pie,
-    data_source_metadata: dict[str, Any],
-) -> None:
-    st.header("Analysis Index & Settings")
-    st.subheader("Calculation Settings")
-    settings_table = make_settings_table(
-        report_name,
-        portfolio_value,
-        asset_cols,
-        factor_cols,
-        dist_type,
-        corr_method,
-        selected_dates,
-        observations,
-        confidence,
-        rf_rate,
-        num_sims,
-    )
-    st.dataframe(settings_table, hide_index=True, use_container_width=True)
-
-    st.caption(
-        f"Portfolio history: {data_source_metadata.get('fund_history_label', 'unknown')} | "
-        f"Factor overlap: {data_source_metadata.get('overlap_label', 'unknown')}"
-    )
-
-    st.subheader("Portfolio Composition")
-    st.plotly_chart(fig_pie, use_container_width=True, key="index_portfolio_composition")
-
-    st.subheader("Quick Links")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.info("📈 **SUMMARY**  \nKey metrics and risk overview")
-    with col2:
-        st.info("📊 **HISTORICAL RISK**  \nDetailed historical statistics")
-    with col3:
-        st.info("🎲 **SIMULATED RISK**  \nFat-tail risk metrics")
-
-
-def render_data_quality_tab(data_quality_report, data_source_metadata: dict[str, Any]) -> None:
-    st.header("Data Quality")
-    st.caption(
-        f"Source mode: {data_source_metadata.get('mode', 'unknown')} | "
-        f"Fund history: {data_source_metadata.get('fund_history_label', 'unknown')} | "
-        f"Factor overlap: {data_source_metadata.get('overlap_label', 'unknown')}"
-    )
-
-    overview_display = data_quality_report.overview.copy()
-    if not overview_display.empty:
-        st.subheader("Analysis Summary")
-        st.dataframe(overview_display, hide_index=True, use_container_width=True)
-
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.subheader("Fund Data")
-        if not data_quality_report.fund_summary.empty:
-            fund_summary = data_quality_report.fund_summary.copy()
-            for column in ['first_date', 'last_date']:
-                if column in fund_summary.columns:
-                    fund_summary[column] = pd.to_datetime(fund_summary[column], errors='coerce').dt.date
-            if 'missing_pct' in fund_summary.columns:
-                fund_summary['missing_pct'] = fund_summary['missing_pct'].map(lambda value: f'{float(value):.1%}' if pd.notna(value) else 'n/a')
-            st.dataframe(fund_summary, hide_index=True, use_container_width=True)
-        else:
-            st.info('No fund quality summary was available.')
-
-    with col_right:
-        st.subheader("Factor Data")
-        if not data_quality_report.factor_summary.empty:
-            factor_summary = data_quality_report.factor_summary.copy()
-            for column in ['first_date', 'last_date']:
-                if column in factor_summary.columns:
-                    factor_summary[column] = pd.to_datetime(factor_summary[column], errors='coerce').dt.date
-            if 'missing_pct' in factor_summary.columns:
-                factor_summary['missing_pct'] = factor_summary['missing_pct'].map(lambda value: f'{float(value):.1%}' if pd.notna(value) else 'n/a')
-            st.dataframe(factor_summary, hide_index=True, use_container_width=True)
-        else:
-            st.info('No factor quality summary was available.')
-
-    st.subheader("Rows Removed By Merge")
-    def _overview_value(metric_name: str) -> int:
-        if data_quality_report.overview.empty or 'metric' not in data_quality_report.overview.columns:
-            return 0
-        match = data_quality_report.overview.loc[data_quality_report.overview['metric'].eq(metric_name), 'value']
-        if match.empty:
-            return 0
-        return int(match.iloc[0])
-
-    merge_notes = pd.DataFrame(
-        [
-            {
-                'metric': 'fund raw rows',
-                'value': _overview_value('fund_raw_rows_total'),
-            },
-            {
-                'metric': 'fund cleaned rows',
-                'value': _overview_value('fund_cleaned_rows_total'),
-            },
-            {
-                'metric': 'factor raw rows',
-                'value': _overview_value('factor_raw_rows_total'),
-            },
-            {
-                'metric': 'factor cleaned rows',
-                'value': _overview_value('factor_cleaned_rows_total'),
-            },
-            {
-                'metric': 'merged overlap rows used for factor analytics',
-                'value': _overview_value('merged_overlap_rows'),
-            },
-        ]
-    )
-    st.dataframe(merge_notes, hide_index=True, use_container_width=True)
-
-    if not data_quality_report.factor_correlations.empty:
-        st.subheader("Factor Correlations Above 0.75")
-        st.dataframe(data_quality_report.factor_correlations, hide_index=True, use_container_width=True)
-
-    if data_quality_report.warnings:
-        st.subheader("Warnings")
-        for warning in data_quality_report.warnings:
-            st.warning(warning)
-
-    if data_quality_report.errors:
-        st.subheader("Errors")
-        for error in data_quality_report.errors:
-            st.error(error)
-
-
-def render_summary_tab(hist_stats: dict[str, float], sim_stats: dict[str, float], ols_results: dict[str, object], sys_spec: dict[str, Any], simulated_portfolio_returns: pd.Series, data_source_metadata: dict[str, Any]) -> None:
-    st.header("Risk Summary")
-    st.caption(
-        f"Portfolio metrics use full fund history: {data_source_metadata.get('fund_history_label', 'unknown')}; "
-        f"factor diagnostics use {data_source_metadata.get('overlap_label', 'unknown')}"
-    )
-    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-    with col_kpi1:
-        st.metric("Ann. Return", f"{hist_stats['ann_mean']:.2%}")
-    with col_kpi2:
-        st.metric("Ann. Volatility", f"{hist_stats['ann_vol']:.2%}")
-    with col_kpi3:
-        st.metric("Sharpe Ratio", f"{hist_stats['sharpe']:.2f}")
-    with col_kpi4:
-        st.metric("VaR (95%)", f"{hist_stats['var']:.2%}")
-
-    st.subheader("Simulated Return Distribution (Student-t)")
-    st.plotly_chart(make_simulated_distribution_chart(simulated_portfolio_returns, sim_stats), use_container_width=True, key="summary_simulated_distribution")
-
-    col_trad, col_tail = st.columns(2)
-    with col_trad:
-        st.subheader("Traditional Measures")
-        st.table(make_traditional_measures_table(hist_stats))
-    with col_tail:
-        st.subheader("Tail Risk Measures")
-        st.table(make_tail_risk_table(hist_stats))
-
-    st.subheader("Factor Model Diagnostics")
-    col_r2, col_sys = st.columns(2)
-    with col_r2:
-        st.metric("Model R²", f"{ols_results['r2']:.3f}")
-    with col_sys:
-        st.metric("Systematic Risk %", f"{sys_spec['systematic_pct']:.1%}")
-
-    st.subheader("Factor Exposures & Significance")
-    st.dataframe(make_factor_exposure_table(ols_results), use_container_width=True)
-
-
-def render_historical_risk_tab(hist_stats: dict[str, float], portfolio: pd.Series, data_source_metadata: dict[str, Any]) -> None:
-    st.header("Historical Risk Statistics")
-    st.caption(f"Actual historical period statistics using {data_source_metadata.get('fund_history_label', 'unknown')}.")
-    st.dataframe(make_historical_risk_table(hist_stats), hide_index=True, use_container_width=True)
-    st.subheader("Cumulative Growth")
-    st.plotly_chart(make_cumulative_growth_chart(portfolio), use_container_width=True, key="historical_cumulative_growth")
-
-
-def render_simulated_risk_tab(hist_stats: dict[str, float], sim_stats: dict[str, float], num_sims: int, simulated_portfolio_returns: pd.Series, data_source_metadata: dict[str, Any]) -> None:
-    st.header("Simulated Risk Statistics")
-    st.caption(f"Based on {num_sims:,} Student-t Monte Carlo simulations using {data_source_metadata.get('fund_history_label', 'unknown')}.")
-    st.dataframe(make_simulated_risk_table(sim_stats, num_sims), hide_index=True, use_container_width=True)
-    st.subheader("Historical vs. Simulated Comparison")
-    st.dataframe(make_historical_vs_simulated_table(hist_stats, sim_stats), hide_index=True, use_container_width=True)
-    st.plotly_chart(make_simulated_distribution_chart(simulated_portfolio_returns, sim_stats), use_container_width=True, key="simulated_distribution_tab")
-
-
-def render_risk_budgeting_tab(rb_table: pd.DataFrame, risk_label: str, data_source_metadata: dict[str, Any]) -> None:
-    st.dataframe(rb_table, hide_index=True, use_container_width=True)
-    st.caption(f"Risk budgeting uses the overlap period {data_source_metadata.get('overlap_label', 'unknown')}.")
-    st.subheader("Risk-Return Analysis")
-    st.plotly_chart(make_risk_budgeting_chart(rb_table, risk_label), use_container_width=True, key=f"risk_budgeting_{risk_label.lower()}")
-
-
-def render_factor_contribution_tab(factor_contrib: dict[str, Any], show_factor_buckets: bool, data_source_metadata: dict[str, Any]) -> None:
-    st.header("Factor Contribution to Portfolio Risk")
-    st.caption(
-        "Percentage Contribution to Risk by factor bucket shows how a given factor bucket contributes to the overall portfolio risk. "
-        f"Factor analytics use {data_source_metadata.get('overlap_label', 'unknown')}."
-    )
-    col_sys, col_spec = st.columns(2)
-    with col_sys:
-        st.metric("Systematic Risk (StDev %)", f"{factor_contrib['systematic_stdev_pct']:.1%}")
-    with col_spec:
-        st.metric("Specific/Idiosyncratic Risk (%)", f"{factor_contrib['specific_stdev_pct']:.1%}")
-
-    if show_factor_buckets and factor_contrib["bucket_mapping"]:
-        st.subheader("Factor Risk by Bucket")
-        bucket_df = make_factor_bucket_table(factor_contrib)
-        st.dataframe(bucket_df, hide_index=True, use_container_width=True)
-        st.plotly_chart(make_factor_bucket_chart(bucket_df), use_container_width=True, key="factor_bucket_chart")
-
-    st.subheader("Factor-Level Contributions")
-    st.dataframe(make_factor_level_contribution_table(factor_contrib), hide_index=True, use_container_width=True)
-
-
-def render_exposure_tab(bucket_exposures: pd.DataFrame, data_source_metadata: dict[str, Any]) -> None:
-    st.header("Exposure by Factor Bucket")
-    st.caption(f"The sensitivity of the portfolio toward each market segment (factor basket) using {data_source_metadata.get('overlap_label', 'unknown')}.")
-    if not bucket_exposures.empty:
-        st.subheader("Portfolio Exposure by Bucket")
-        st.dataframe(bucket_exposures, hide_index=True, use_container_width=True)
-        st.plotly_chart(make_exposure_chart(bucket_exposures), use_container_width=True, key="factor_bucket_exposure")
-    else:
-        st.info("Not enough factor data for exposure decomposition. Ensure you have multiple factors selected.")
+DEFAULT_EWMA_DECAY = 0.94 # what does this mean?
 
 
 def _make_weight_preview_table(asset_cols: list[str], raw_weights: pd.Series, normalized_weights: pd.Series, status_message: str) -> pd.DataFrame:
