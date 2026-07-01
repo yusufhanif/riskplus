@@ -11,12 +11,14 @@ from riskplus_core.reporting import (
     make_factor_bucket_table,
     make_factor_exposure_table,
     make_factor_level_contribution_table,
+    make_historical_risk_table_detailed,
     make_historical_risk_table,
     make_historical_vs_simulated_table,
     make_portfolio_pie_chart,
     make_risk_budgeting_chart,
     make_settings_table,
     make_simulated_distribution_chart,
+    make_simulated_risk_table_detailed,
     make_simulated_risk_table,
     make_tail_risk_table,
     make_traditional_measures_table,
@@ -83,3 +85,29 @@ def test_reporting_builders_return_pure_objects() -> None:
     assert isinstance(make_risk_budgeting_chart(rb_table, 'ETL'), go.Figure)
     assert isinstance(make_factor_bucket_chart(make_factor_bucket_table(factor_contrib)), go.Figure)
     assert isinstance(make_exposure_chart(pd.DataFrame({'Bucket': ['Equity Risk'], 'Exposure': [0.4]})), go.Figure)
+
+    detailed_hist = make_historical_risk_table_detailed(
+        hist_stats,
+        {
+            'FundA': dict(hist_stats),
+            'FundB': dict(hist_stats),
+        },
+        pd.Series([0.6, 0.4], index=['FundA', 'FundB']),
+    )
+    assert isinstance(detailed_hist, pd.DataFrame)
+    assert len(detailed_hist) == 3
+    assert detailed_hist.iloc[0]['Name'] == 'Portfolio'
+
+    detailed_sim = make_simulated_risk_table_detailed(
+        sim_stats,
+        {
+            'FundA': dict(sim_stats),
+            'FundB': dict(sim_stats),
+        },
+        pd.Series([0.6, 0.4], index=['FundA', 'FundB']),
+        {'mc_vol': [0.1, 0.2], 'mc_etl': [0.3, 0.4], 'mc_etr': [0.5, 0.6]},
+        {'pc_vol': [0.4, 0.6], 'pc_etl': [0.3, 0.7], 'pc_etr': [0.2, 0.8]},
+    )
+    assert isinstance(detailed_sim, pd.DataFrame)
+    assert len(detailed_sim) == 3
+    assert detailed_sim.iloc[0]['Name'] == 'Portfolio'

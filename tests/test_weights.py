@@ -191,3 +191,8 @@ def test_large_portfolio_37_fund_risk_budgeting_shape() -> None:
 
     assert len(results.rb_etl) == 37
     assert len(results.asset_weights) == 37
+    assert len(results.mc_contribs['mc_vol']) == 37
+    assert len(results.mc_contribs['mc_etl']) == 37
+    assert len(results.mc_contribs['mc_etr']) == 37
+    assert results.rb_etl['Asset'].tolist() == asset_cols
+    assert results.rb_stdev['Asset'].tolist() == asset_cols

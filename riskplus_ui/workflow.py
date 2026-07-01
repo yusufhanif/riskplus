@@ -85,6 +85,35 @@ class GuidedWorkflowState:
         return self.mapping_result.bundle is not None and self.weight_result.weights is not None and not self.mapping_result.errors and not self.weight_result.errors
 
 
+_SELECT_ALL_SENTINEL = "__SELECT_ALL__"
+
+
+def _multiselect_with_select_all(label: str, options: list[str], key: str) -> list[str]:
+    # Keep only currently valid selections when options change across reruns.
+    current = st.session_state.get(key, [])
+    if isinstance(current, list):
+        filtered_current = [value for value in current if value in options]
+    else:
+        filtered_current = []
+    if filtered_current != current:
+        st.session_state[key] = filtered_current
+
+    def _apply_select_all() -> None:
+        selected = st.session_state.get(key, [])
+        if _SELECT_ALL_SENTINEL in selected:
+            st.session_state[key] = list(options)
+
+    selected = st.multiselect(
+        label,
+        options=[_SELECT_ALL_SENTINEL, *options],
+        default=filtered_current,
+        key=key,
+        format_func=lambda option: "Select all" if option == _SELECT_ALL_SENTINEL else option,
+        on_change=_apply_select_all,
+    )
+    return [value for value in selected if value in options]
+
+
 def _render_step_header(step_number: int, title: str, status: str, description: str | None = None) -> None:
     status_labels = {
         "complete": "Complete",
@@ -196,12 +225,9 @@ def _build_combined_mapping(upload_context: UploadContext, values_in_percent: bo
     combined_raw = read_uploaded_file(upload_context.combined_upload.name, upload_context.combined_upload.getvalue())
     combined_date_col = st.selectbox("Date column", options=combined_raw.columns.tolist(), index=0, key="workflow_combined_date_col")
     combined_value_cols = [col for col in combined_raw.columns if col != combined_date_col]
-    combined_fund_cols = st.multiselect("Fund return columns", options=combined_value_cols, default=[], key="workflow_combined_fund_cols")
-    combined_factor_cols = st.multiselect(
-        "Factor return columns",
-        options=[col for col in combined_value_cols if col not in combined_fund_cols],
-        default=[],
-        key="workflow_combined_factor_cols",
+    combined_fund_cols = _multiselect_with_select_all("Fund return columns", combined_value_cols, "workflow_combined_fund_cols")
+    combined_factor_cols = _multiselect_with_select_all(
+        "Factor return columns", [col for col in combined_value_cols if col not in combined_fund_cols], "workflow_combined_factor_cols"
     )
 
     errors: list[str] = []
@@ -242,19 +268,9 @@ def _build_wide_fund_plus_factor_mapping(upload_context: UploadContext, values_i
     factor_raw = read_uploaded_file(upload_context.wide_factor_upload.name, upload_context.wide_factor_upload.getvalue())
 
     fund_date_col = st.selectbox("Fund file date column", options=fund_raw.columns.tolist(), index=0, key="workflow_fund_date_col")
-    fund_cols = st.multiselect(
-        "Fund return columns",
-        options=[col for col in fund_raw.columns if col != fund_date_col],
-        default=[],
-        key="workflow_fund_cols",
-    )
+    fund_cols = _multiselect_with_select_all("Fund return columns", [col for col in fund_raw.columns if col != fund_date_col], "workflow_fund_cols")
     factor_date_col = st.selectbox("Factor file date column", options=factor_raw.columns.tolist(), index=0, key="workflow_factor_date_col")
-    factor_cols = st.multiselect(
-        "Factor return columns",
-        options=[col for col in factor_raw.columns if col != factor_date_col],
-        default=[],
-        key="workflow_factor_cols",
-    )
+    factor_cols = _multiselect_with_select_all("Factor return columns", [col for col in factor_raw.columns if col != factor_date_col], "workflow_factor_cols")
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -336,12 +352,7 @@ def _build_separate_fund_mapping(upload_context: UploadContext, values_in_percen
 
     factor_raw = read_uploaded_file(upload_context.factor_upload.name, upload_context.factor_upload.getvalue())
     factor_date_col = st.selectbox("Factor file date column", options=factor_raw.columns.tolist(), index=0, key="workflow_separate_factor_date_col")
-    factor_cols = st.multiselect(
-        "Factor return columns",
-        options=[col for col in factor_raw.columns if col != factor_date_col],
-        default=[],
-        key="workflow_separate_factor_cols",
-    )
+    factor_cols = _multiselect_with_select_all("Factor return columns", [col for col in factor_raw.columns if col != factor_date_col], "workflow_separate_factor_cols")
 
     if not factor_cols:
         errors.append('Select at least one factor return column.')

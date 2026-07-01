@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .analytics import (
+    compute_percent_risk_contributions,
     compute_factor_bucket_exposures,
     compute_factor_contribution,
     compute_historical_stats,
@@ -85,10 +86,18 @@ def run_core_analysis(
     frequency = detect_frequency(portfolio_history.index)
     portfolio, asset_weights = build_portfolio_series(portfolio_history, asset_cols, asset_weight_input)
     hist_stats = compute_historical_stats(portfolio, frequency, rf_rate)
+    hist_stats_by_fund = {
+        fund: compute_historical_stats(portfolio_history[fund], frequency, rf_rate)
+        for fund in asset_cols
+    }
 
     simulated_portfolio_returns = simulate_fat_tailed_returns(portfolio, n_sims=int(num_sims), random_seed=random_seed)['Portfolio']
     simulated_fund_returns = simulate_fat_tailed_returns(portfolio_history, n_sims=int(num_sims), random_seed=random_seed)
     sim_stats = compute_historical_stats(simulated_portfolio_returns, frequency, rf_rate)
+    sim_stats_by_fund = {
+        fund: compute_historical_stats(simulated_fund_returns[fund], frequency, rf_rate)
+        for fund in asset_cols
+    }
 
     required_cols = asset_cols + factor_cols
     if set(required_cols).issubset(analysis_data.columns):
@@ -113,6 +122,7 @@ def run_core_analysis(
     ols_results = run_ols(portfolio_for_factor_model, factors)
 
     mc_contribs = compute_marginal_risk_contributions(asset_weights.values, simulated_fund_returns, confidence)
+    pc_contribs = compute_percent_risk_contributions(asset_weights.values, mc_contribs)
     sys_spec = compute_systematic_specific_risk(portfolio_for_factor_model, factors, ols_results['model'])
     factor_contrib = compute_factor_contribution(
         ols_results['model'],
@@ -152,8 +162,11 @@ def run_core_analysis(
         simulated_returns=simulated_portfolio_returns.to_frame(name='Portfolio'),
         hist_stats=hist_stats,
         sim_stats=sim_stats,
+        hist_stats_by_fund=hist_stats_by_fund,
+        sim_stats_by_fund=sim_stats_by_fund,
         ols_results=ols_results,
         mc_contribs=mc_contribs,
+        pc_contribs=pc_contribs,
         sys_spec=sys_spec,
         factor_contrib=factor_contrib,
         rb_etl=rb_etl,

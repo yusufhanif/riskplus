@@ -7,6 +7,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
+def _fmt_pct(value: float | int | None) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return f"{float(value) * 100:.2f}"
+
+
+def _fmt_num(value: float | int | None, digits: int = 3) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return f"{float(value):.{digits}f}"
+
+
 def make_settings_table(
     report_name: str,
     portfolio_value: float,
@@ -97,6 +109,42 @@ def make_historical_risk_table(hist_stats: dict[str, float]) -> pd.DataFrame:
     )
 
 
+def make_historical_risk_table_detailed(
+    portfolio_stats: dict[str, float],
+    hist_stats_by_fund: dict[str, dict[str, float]],
+    asset_weights: pd.Series,
+) -> pd.DataFrame:
+    def _row(name: str, stats: dict[str, float], weight: float | None) -> dict[str, object]:
+        return {
+            'Name': name,
+            'Weight (%)': '' if weight is None else f"{weight * 100:.2f}",
+            'Mean': _fmt_num(stats.get('mean'), 4),
+            'StDev': _fmt_num(stats.get('vol'), 4),
+            'Sharpe': _fmt_num(stats.get('sharpe'), 3),
+            'STARR': _fmt_num(stats.get('starr'), 3),
+            'Rachev': _fmt_num(stats.get('rachev'), 3),
+            'Skew': _fmt_num(stats.get('skew'), 3),
+            'Excess Kurtosis': _fmt_num(stats.get('xkurt'), 3),
+            'Max Drawdown (%)': _fmt_pct(stats.get('max_dd')),
+            'Ann. Mean': _fmt_pct(stats.get('ann_mean')),
+            'Ann. StDev': _fmt_pct(stats.get('ann_vol')),
+            'VaR (95%)': _fmt_pct(stats.get('var')),
+            'ETL (95%)': _fmt_pct(stats.get('etl')),
+            'ETR (95%)': _fmt_pct(stats.get('etr')),
+            'Observations': int(stats.get('obs_count', 0) or 0),
+        }
+
+    rows: list[dict[str, object]] = []
+    rows.append(_row('Portfolio', portfolio_stats, None))
+    for fund in asset_weights.index.tolist():
+        fund_stats = hist_stats_by_fund.get(fund)
+        if fund_stats is None:
+            continue
+        rows.append(_row(fund, fund_stats, float(asset_weights.loc[fund])))
+
+    return pd.DataFrame(rows)
+
+
 def make_simulated_risk_table(sim_stats: dict[str, float], num_sims: int) -> pd.DataFrame:
     """Build the simulated risk table shown in the Simulated Risk tab."""
     return pd.DataFrame(
@@ -133,6 +181,68 @@ def make_simulated_risk_table(sim_stats: dict[str, float], num_sims: int) -> pd.
             ],
         }
     )
+
+
+def make_simulated_risk_table_detailed(
+    portfolio_stats: dict[str, float],
+    sim_stats_by_fund: dict[str, dict[str, float]],
+    asset_weights: pd.Series,
+    mc_contribs: dict[str, object],
+    pc_contribs: dict[str, object],
+) -> pd.DataFrame:
+    mc_vol = list(mc_contribs.get('mc_vol', []))
+    mc_etl = list(mc_contribs.get('mc_etl', []))
+    mc_etr = list(mc_contribs.get('mc_etr', []))
+
+    pc_vol = list(pc_contribs.get('pc_vol', []))
+    pc_etl = list(pc_contribs.get('pc_etl', []))
+    pc_etr = list(pc_contribs.get('pc_etr', []))
+
+    rows: list[dict[str, object]] = []
+    rows.append(
+        {
+            'Name': 'Portfolio',
+            'Weight (%)': '100.00',
+            'ETR (%)': _fmt_pct(portfolio_stats.get('etr')),
+            'ETL (%)': _fmt_pct(portfolio_stats.get('etl')),
+            'VaR (%)': _fmt_pct(portfolio_stats.get('var')),
+            'PC to StDev (%)': '100.00',
+            'PC to ETL (%)': '100.00',
+            'PC to ETR (%)': '100.00',
+            'MC to StDev (bps)': '',
+            'MC to ETL (bps)': '',
+            'MC to ETR (bps)': '',
+            'Ann. Mean': _fmt_pct(portfolio_stats.get('ann_mean')),
+            'Ann. StDev': _fmt_pct(portfolio_stats.get('ann_vol')),
+            'Observations (simulated)': int(portfolio_stats.get('obs_count', 0) or 0),
+        }
+    )
+
+    for idx, fund in enumerate(asset_weights.index.tolist()):
+        stats = sim_stats_by_fund.get(fund)
+        if stats is None:
+            continue
+
+        rows.append(
+            {
+                'Name': fund,
+                'Weight (%)': f"{float(asset_weights.iloc[idx]) * 100:.2f}",
+                'ETR (%)': _fmt_pct(stats.get('etr')),
+                'ETL (%)': _fmt_pct(stats.get('etl')),
+                'VaR (%)': _fmt_pct(stats.get('var')),
+                'PC to StDev (%)': _fmt_num((pc_vol[idx] * 100) if idx < len(pc_vol) else None, 2),
+                'PC to ETL (%)': _fmt_num((pc_etl[idx] * 100) if idx < len(pc_etl) else None, 2),
+                'PC to ETR (%)': _fmt_num((pc_etr[idx] * 100) if idx < len(pc_etr) else None, 2),
+                'MC to StDev (bps)': _fmt_num((mc_vol[idx] * 10000) if idx < len(mc_vol) else None, 2),
+                'MC to ETL (bps)': _fmt_num((mc_etl[idx] * 10000) if idx < len(mc_etl) else None, 2),
+                'MC to ETR (bps)': _fmt_num((mc_etr[idx] * 10000) if idx < len(mc_etr) else None, 2),
+                'Ann. Mean': _fmt_pct(stats.get('ann_mean')),
+                'Ann. StDev': _fmt_pct(stats.get('ann_vol')),
+                'Observations (simulated)': int(stats.get('obs_count', 0) or 0),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def make_historical_vs_simulated_table(hist_stats: dict[str, float], sim_stats: dict[str, float]) -> pd.DataFrame:

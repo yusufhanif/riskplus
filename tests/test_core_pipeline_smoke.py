@@ -49,7 +49,10 @@ def test_run_core_analysis_smoke() -> None:
     assert results.simulated_fund_returns is not None
     assert results.simulated_portfolio_returns is not None
     assert results.sim_stats
+    assert results.hist_stats_by_fund
+    assert results.sim_stats_by_fund
     assert results.mc_contribs
+    assert results.pc_contribs
     assert results.sys_spec
     assert results.rb_etl is not None
     assert results.rb_stdev is not None
@@ -62,6 +65,9 @@ def test_run_core_analysis_smoke() -> None:
     assert len(results.simulated_portfolio_returns) == 1000
     assert len(results.mc_contribs['mc_vol']) == 3
     assert len(results.mc_contribs['mc_etl']) == 3
+    assert len(results.hist_stats_by_fund) == 3
+    assert len(results.sim_stats_by_fund) == 3
+    assert len(results.pc_contribs['pc_vol']) == 3
     assert len(results.rb_etl) == 3
     assert len(results.rb_stdev) == 3
 

@@ -26,12 +26,14 @@ from riskplus_core.reporting import (
     make_factor_bucket_table,
     make_factor_exposure_table,
     make_factor_level_contribution_table,
+    make_historical_risk_table_detailed,
     make_historical_risk_table,
     make_historical_vs_simulated_table,
     make_portfolio_pie_chart,
     make_risk_budgeting_chart,
     make_settings_table,
     make_simulated_distribution_chart,
+    make_simulated_risk_table_detailed,
     make_simulated_risk_table,
     make_tail_risk_table,
     make_traditional_measures_table,
@@ -226,12 +228,22 @@ def render_summary_tab(
     st.dataframe(make_factor_exposure_table(ols_results), use_container_width=True)
 
 
-def render_historical_risk_tab(hist_stats: dict[str, float], portfolio: pd.Series, data_source_metadata: dict[str, Any]) -> None:
+def render_historical_risk_tab(
+    hist_stats: dict[str, float],
+    hist_stats_by_fund: dict[str, dict[str, float]],
+    asset_weights: pd.Series,
+    portfolio: pd.Series,
+    data_source_metadata: dict[str, Any],
+) -> None:
     st.header("Historical Risk Statistics")
     with st.expander("Explain this result", expanded=False):
         st.caption(explain_historical_risk_metric('ann_mean'))
     st.caption(f"Actual historical period statistics using {data_source_metadata.get('fund_history_label', 'unknown')}.")
-    st.dataframe(make_historical_risk_table(hist_stats), hide_index=True, use_container_width=True)
+    st.dataframe(
+        make_historical_risk_table_detailed(hist_stats, hist_stats_by_fund, asset_weights),
+        hide_index=True,
+        use_container_width=True,
+    )
     st.subheader("Cumulative Growth")
     st.plotly_chart(make_cumulative_growth_chart(portfolio), use_container_width=True, key="historical_cumulative_growth")
 
@@ -239,6 +251,10 @@ def render_historical_risk_tab(hist_stats: dict[str, float], portfolio: pd.Serie
 def render_simulated_risk_tab(
     hist_stats: dict[str, float],
     sim_stats: dict[str, float],
+    sim_stats_by_fund: dict[str, dict[str, float]],
+    asset_weights: pd.Series,
+    mc_contribs: dict[str, Any],
+    pc_contribs: dict[str, Any],
     num_sims: int,
     simulated_portfolio_returns: pd.Series,
     data_source_metadata: dict[str, Any],
@@ -247,7 +263,11 @@ def render_simulated_risk_tab(
     with st.expander("Explain this result", expanded=False):
         st.caption(explain_simulated_risk_metric('var'))
     st.caption(f"Based on {num_sims:,} Student-t Monte Carlo simulations using {data_source_metadata.get('fund_history_label', 'unknown')}.")
-    st.dataframe(make_simulated_risk_table(sim_stats, num_sims), hide_index=True, use_container_width=True)
+    st.dataframe(
+        make_simulated_risk_table_detailed(sim_stats, sim_stats_by_fund, asset_weights, mc_contribs, pc_contribs),
+        hide_index=True,
+        use_container_width=True,
+    )
     st.subheader("Historical vs. Simulated Comparison")
     st.dataframe(make_historical_vs_simulated_table(hist_stats, sim_stats), hide_index=True, use_container_width=True)
     st.plotly_chart(
@@ -367,10 +387,26 @@ def render_report_tabs(
         render_summary_tab(hist_stats, sim_stats, ols_results, sys_spec, simulated_portfolio_returns, data_source_metadata)
 
     with tabs[3]:
-        render_historical_risk_tab(hist_stats, portfolio, data_source_metadata)
+        render_historical_risk_tab(
+            hist_stats,
+            core_results.hist_stats_by_fund,
+            asset_weights,
+            portfolio,
+            data_source_metadata,
+        )
 
     with tabs[4]:
-        render_simulated_risk_tab(hist_stats, sim_stats, num_sims, simulated_portfolio_returns, data_source_metadata)
+        render_simulated_risk_tab(
+            hist_stats,
+            sim_stats,
+            core_results.sim_stats_by_fund,
+            asset_weights,
+            core_results.mc_contribs,
+            core_results.pc_contribs,
+            num_sims,
+            simulated_portfolio_returns,
+            data_source_metadata,
+        )
 
     with tabs[5]:
         st.header("Risk Budgeting by ETL")

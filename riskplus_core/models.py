@@ -58,8 +58,11 @@ class CoreAnalysisResults:
     simulated_returns: pd.DataFrame | None = None
     hist_stats: dict[str, float] = field(default_factory=dict)
     sim_stats: dict[str, float] = field(default_factory=dict)
+    hist_stats_by_fund: dict[str, dict[str, float]] = field(default_factory=dict)
+    sim_stats_by_fund: dict[str, dict[str, float]] = field(default_factory=dict)
     ols_results: dict[str, Any] = field(default_factory=dict)
     mc_contribs: dict[str, Any] = field(default_factory=dict)
+    pc_contribs: dict[str, Any] = field(default_factory=dict)
     sys_spec: dict[str, Any] = field(default_factory=dict)
     factor_contrib: dict[str, Any] = field(default_factory=dict)
     rb_etl: pd.DataFrame | None = None
